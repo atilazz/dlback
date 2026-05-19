@@ -1,302 +1,200 @@
-name: UploadRAR Deep Sniffer
+import asyncio
+from playwright.async_api import async_playwright
 
-on:
-  workflow_dispatch:
-    inputs:
-      page_url:
-        description: "UploadRAR URL"
-        required: true
-        type: string
+URL = "https://uploadrar.com/lsy90ncgkak3"
 
-permissions:
-  contents: write
 
-jobs:
-  download:
-    runs-on: ubuntu-latest
+async def wait_cloudflare(context, timeout=60):
+    print("Waiting for Cloudflare clearance...")
 
-    steps:
-      - uses: actions/checkout@v4
+    for i in range(timeout):
+        cookies = await context.cookies()
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+        for c in cookies:
+            if c["name"] == "cf_clearance":
+                print("Cloudflare solved")
+                return
 
-      - name: Install
-        run: |
-          pip install playwright requests
-          playwright install chromium
+        await asyncio.sleep(1)
 
-      - name: Download
-        env:
-          PAGE_URL: ${{ github.event.inputs.page_url }}
-        run: |
-          python << 'EOF'
+    raise Exception("Cloudflare challenge not solved")
 
-          import asyncio
-          import os
-          import requests
-          from urllib.parse import unquote, urlparse
 
-          from playwright.async_api import async_playwright
+async def main():
+    async with async_playwright() as p:
 
-          FILE_URL = None
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir="./chrome_profile",
 
-          async def main():
+            headless=False,
 
-              global FILE_URL
+            accept_downloads=True,
 
-              async with async_playwright() as p:
+            viewport={
+                "width": 1280,
+                "height": 720
+            },
 
-                  browser = await p.chromium.launch(
-                      headless=True,
-                      args=[
-                          "--no-sandbox",
-                          "--disable-dev-shm-usage"
-                      ]
-                  )
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/147.0.0.0 Safari/537.36"
+            ),
 
-                  context = await browser.new_context(
-                      accept_downloads=True
-                  )
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+            ]
+        )
 
-                  ##################################################
-                  # GLOBAL REQUEST LOGGER
-                  ##################################################
+        page = await context.new_page()
 
-                  async def handle_request(request):
+        #
+        # DEBUG LOGS
+        #
 
-                      global FILE_URL
+        page.on(
+            "request",
+            lambda r: print(f"[REQ] {r.method} {r.url}")
+        )
 
-                      url = request.url
+        page.on(
+            "response",
+            lambda r: print(f"[RES] {r.status} {r.url}")
+        )
 
-                      print(f"[REQ] {url}")
+        page.on(
+            "download",
+            lambda d: print(
+                f"[DOWNLOAD] {d.suggested_filename}"
+            )
+        )
 
-                      lower = url.lower()
+        print(f"Opening: {URL}")
 
-                      if (
-                          "uploadrar.com:183" in lower
-                          or lower.endswith(".rar")
-                          or lower.endswith(".zip")
-                          or lower.endswith(".7z")
-                      ):
+        await page.goto(
+            URL,
+            wait_until="domcontentloaded",
+            timeout=120000
+        )
 
-                          print(f"\n[FOUND FILE]\n{url}\n")
+        #
+        # WAIT FOR CLOUDFLARE
+        #
 
-                          FILE_URL = url
+        await wait_cloudflare(context)
 
-                  context.on(
-                      "request",
-                      handle_request
-                  )
+        #
+        # WAIT PAGE FULLY READY
+        #
 
-                  ##################################################
-                  # POPUP CAPTURE
-                  ##################################################
+        await page.wait_for_load_state("networkidle")
 
-                  async def popup_handler(popup):
+        await page.wait_for_timeout(5000)
 
-                      print("[POPUP OPENED]")
+        #
+        # CLICK FREE METHOD BUTTON
+        #
 
-                      async def popup_req(req):
+        free_btn = page.locator(
+            'button[name="method_free"]'
+        )
 
-                          global FILE_URL
+        await free_btn.wait_for(timeout=60000)
 
-                          url = req.url
+        print("Clicking: method_free")
 
-                          print(f"[POPUP REQ] {url}")
+        await free_btn.click()
 
-                          lower = url.lower()
+        #
+        # COUNTDOWN
+        #
 
-                          if (
-                              "uploadrar.com:183" in lower
-                              or ".rar" in lower
-                              or ".zip" in lower
-                          ):
+        for i in range(8, 0, -1):
+            print(f"Waiting {i}s")
+            await asyncio.sleep(1)
 
-                              print(f"\n[FOUND IN POPUP]\n{url}\n")
+        #
+        # WAIT BUTTON APPEAR
+        #
 
-                              FILE_URL = url
+        download_btn = page.locator(
+            'button:has-text("Free Download")'
+        )
 
-                      popup.on(
-                          "request",
-                          popup_req
-                      )
+        await download_btn.wait_for(
+            timeout=120000
+        )
 
-                  page = await context.new_page()
+        print("Clicking: Free Download")
 
-                  page.on("popup", popup_handler)
+        #
+        # CAPTURE DOWNLOAD
+        #
 
-                  ##################################################
+        try:
 
-                  page_url = os.environ["PAGE_URL"]
+            async with page.expect_download(
+                timeout=120000
+            ) as download_info:
 
-                  print(f"Opening: {page_url}")
+                await download_btn.click()
 
-                  await page.goto(
-                      page_url,
-                      wait_until="networkidle",
-                      timeout=120000
-                  )
+            download = await download_info.value
 
-                  ##################################################
-                  # CLICK FREE
-                  ##################################################
+            print(
+                f"Download started: "
+                f"{download.suggested_filename}"
+            )
 
-                  selectors = [
-                      'button[name="method_free"]',
-                      'input[name="method_free"]',
-                      'button:has-text("Free Download")'
-                  ]
+            save_path = (
+                f"./{download.suggested_filename}"
+            )
 
-                  for selector in selectors:
+            await download.save_as(save_path)
 
-                      try:
+            print(f"Saved: {save_path}")
 
-                          locator = page.locator(selector)
+        except Exception as e:
 
-                          if await locator.count() > 0:
+            print(
+                f"No direct download detected: {e}"
+            )
 
-                              print(f"Clicking: {selector}")
+            #
+            # TRY POPUP
+            #
 
-                              await locator.first.click()
+            try:
 
-                              break
+                async with page.expect_popup(
+                    timeout=30000
+                ) as popup_info:
 
-                      except:
-                          pass
+                    await download_btn.click()
 
-                  ##################################################
-                  # WAIT COUNTDOWN
-                  ##################################################
+                popup = await popup_info.value
 
-                  try:
+                await popup.wait_for_load_state()
 
-                      txt = await page.locator(
-                          "#seconds"
-                      ).inner_text(timeout=5000)
+                print(
+                    f"Popup URL: {popup.url}"
+                )
 
-                      seconds = int(txt.strip())
+            except Exception as ex:
+                print(
+                    f"Popup also failed: {ex}"
+                )
 
-                      print(f"Countdown: {seconds}s")
+        #
+        # KEEP OPEN
+        #
 
-                      await page.wait_for_timeout(
-                          seconds * 1000
-                      )
+        print("Done")
 
-                  except:
-                      pass
+        await page.wait_for_timeout(30000)
 
-                  ##################################################
-                  # FORCE USER ACTIONS
-                  ##################################################
+        await context.close()
 
-                  for _ in range(5):
 
-                      await page.mouse.move(400, 400)
-
-                      await page.mouse.click(400, 400)
-
-                      await page.wait_for_timeout(2000)
-
-                  ##################################################
-
-                  await page.wait_for_timeout(15000)
-
-                  ##################################################
-
-                  if not FILE_URL:
-
-                      raise Exception(
-                          "No real file URL captured"
-                      )
-
-                  ##################################################
-                  # DOWNLOAD
-                  ##################################################
-
-                  os.makedirs("dl", exist_ok=True)
-
-                  filename = os.path.basename(
-                      urlparse(FILE_URL).path
-                  )
-
-                  filename = unquote(filename)
-
-                  if not filename:
-                      filename = "download.bin"
-
-                  save_path = os.path.join(
-                      "dl",
-                      filename
-                  )
-
-                  cookies = await context.cookies()
-
-                  cookie_header = "; ".join(
-                      f"{c['name']}={c['value']}"
-                      for c in cookies
-                  )
-
-                  headers = {
-                      "User-Agent": (
-                          "Mozilla/5.0 "
-                          "(Windows NT 10.0; Win64; x64)"
-                      ),
-                      "Referer": "https://uploadrar.com/",
-                      "Cookie": cookie_header
-                  }
-
-                  print(f"Downloading: {FILE_URL}")
-
-                  response = requests.get(
-                      FILE_URL,
-                      headers=headers,
-                      stream=True,
-                      timeout=300,
-                      allow_redirects=True
-                  )
-
-                  print(
-                      "STATUS:",
-                      response.status_code
-                  )
-
-                  print(
-                      "CONTENT:",
-                      response.headers.get(
-                          "content-type"
-                      )
-                  )
-
-                  with open(save_path, "wb") as f:
-
-                      for chunk in response.iter_content(
-                          chunk_size=1024 * 1024
-                      ):
-
-                          if chunk:
-                              f.write(chunk)
-
-                  print(f"Saved: {save_path}")
-
-                  await browser.close()
-
-          asyncio.run(main())
-
-          EOF
-
-      - name: Show Files
-        run: |
-          ls -lah dl || true
-
-      - name: Commit
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add dl/
-
-          git commit -m "Add downloaded file [skip ci]" || echo "No changes"
-
-          git push
+asyncio.run(main())
