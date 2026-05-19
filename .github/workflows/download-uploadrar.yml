@@ -1,10 +1,10 @@
-name: Download from UploadRAR with Playwright
+name: Advanced UploadRAR Downloader
 
 on:
   workflow_dispatch:
     inputs:
       page_url:
-        description: 'UploadRAR page URL'
+        description: "UploadRAR URL"
         required: true
         type: string
 
@@ -15,6 +15,8 @@ jobs:
   download:
     runs-on: ubuntu-latest
 
+    timeout-minutes: 60
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,71 +24,193 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright
+
+          pip install \
+            playwright \
+            requests \
+            cloudscraper \
+            fake-useragent
+
           playwright install chromium
 
-      - name: Download file from UploadRAR
+      - name: Download from UploadRAR
         env:
           PAGE_URL: ${{ github.event.inputs.page_url }}
         run: |
           python << 'EOF'
+
           import asyncio
           import os
           import re
+          import time
+          import random
+          import requests
+          import cloudscraper
+
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          from fake_useragent import UserAgent
+
           from playwright.async_api import async_playwright
 
-          DOWNLOAD_DIR = "dl"
+          DOWNLOAD_DIR = Path("dl")
+          DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-          async def close_extra_pages(context, main_page):
+          ua = UserAgent()
+
+          FILE_REGEX = re.compile(
+              r'\.(zip|rar|7z|mp4|mkv|avi|pdf|exe)(\?|$)',
+              re.I
+          )
+
+          BLOCKED_WORDS = [
+              "register",
+              "login",
+              "telegram",
+              "facebook",
+              "twitter",
+              "instagram",
+              "ads",
+              "popup",
+              "javascript:"
+          ]
+
+          ############################################################
+          # HELPERS
+          ############################################################
+
+          def random_sleep(a=1, b=3):
+              time.sleep(random.uniform(a, b))
+
+          def is_valid_link(url):
+
+              if not url:
+                  return False
+
+              lower = url.lower()
+
+              if any(x in lower for x in BLOCKED_WORDS):
+                  return False
+
+              return bool(FILE_REGEX.search(url))
+
+          def filename_from_url(url):
+
+              parsed = urlparse(url)
+
+              name = os.path.basename(parsed.path)
+
+              if not name:
+                  name = "downloaded_file"
+
+              return name
+
+          ############################################################
+          # REQUESTS DOWNLOADER
+          ############################################################
+
+          def direct_download(url):
+
+              print(f"[REQUESTS] Downloading: {url}")
+
+              scraper = cloudscraper.create_scraper()
+
+              headers = {
+                  "User-Agent": ua.random,
+                  "Referer": "https://uploadrar.com/"
+              }
+
+              response = scraper.get(
+                  url,
+                  headers=headers,
+                  stream=True,
+                  timeout=120
+              )
+
+              response.raise_for_status()
+
+              filename = filename_from_url(url)
+
+              filepath = DOWNLOAD_DIR / filename
+
+              with open(filepath, "wb") as f:
+
+                  for chunk in response.iter_content(chunk_size=1024 * 1024):
+
+                      if chunk:
+                          f.write(chunk)
+
+              print(f"[REQUESTS] Saved: {filepath}")
+
+              return True
+
+          ############################################################
+          # PLAYWRIGHT
+          ############################################################
+
+          async def close_ads(context, main_page):
+
               for p in context.pages:
+
                   if p != main_page:
+
                       try:
+                          print("[BROWSER] Closing popup/ad page")
                           await p.close()
+
                       except:
                           pass
 
           async def wait_countdown(page):
 
               try:
-                  seconds_el = page.locator("#seconds")
 
-                  txt = await seconds_el.inner_text(timeout=5000)
+                  el = page.locator("#seconds")
 
-                  wait_time = int(txt.strip())
+                  txt = await el.inner_text(timeout=5000)
 
-                  print(f"Countdown detected: {wait_time}s")
+                  seconds = int(txt.strip())
 
-                  for i in range(wait_time, 0, -1):
-                      print(f"Waiting {i}s...")
+                  print(f"[COUNTDOWN] {seconds}s")
+
+                  for i in range(seconds, 0, -1):
+
+                      print(f"Waiting {i}s")
+
                       await page.wait_for_timeout(1000)
 
               except:
-                  print("No countdown found")
 
-          async def click_free_download(page):
+                  print("[COUNTDOWN] Not found")
+
+          async def click_free(page):
 
               selectors = [
                   'button[name="method_free"]',
                   'input[name="method_free"]',
                   'button:has-text("Free Download")',
-                  'a:has-text("Free Download")'
+                  'a:has-text("Free Download")',
+                  '.btn-free',
+                  '#method_free'
               ]
 
               for selector in selectors:
 
                   try:
-                      btn = page.locator(selector)
 
-                      if await btn.count() > 0:
+                      locator = page.locator(selector)
 
-                          print(f"Clicking free button: {selector}")
+                      if await locator.count() > 0:
 
-                          await btn.first.click()
+                          print(f"[CLICK] {selector}")
+
+                          await locator.first.click()
 
                           await page.wait_for_timeout(3000)
 
@@ -95,51 +219,53 @@ jobs:
                   except:
                       pass
 
-              print("Free download button not found")
               return False
 
-          async def find_real_download_link(page):
+          async def sniff_download_link(page):
 
-              print("Searching for real download link...")
+              print("[SNIFF] Listening for file URLs...")
 
-              await page.wait_for_timeout(5000)
+              found = {
+                  "url": None
+              }
+
+              def handle_response(response):
+
+                  try:
+
+                      url = response.url
+
+                      if is_valid_link(url):
+
+                          print(f"[NETWORK] File URL found: {url}")
+
+                          found["url"] = url
+
+                  except:
+                      pass
+
+              page.on("response", handle_response)
+
+              await page.wait_for_timeout(10000)
+
+              return found["url"]
+
+          async def extract_links(page):
+
+              print("[EXTRACT] Searching links in HTML")
 
               links = await page.query_selector_all("a")
 
               for link in links:
 
                   try:
+
                       href = await link.get_attribute("href")
 
-                      if not href:
-                          continue
+                      if is_valid_link(href):
 
-                      href = href.strip()
+                          print(f"[EXTRACT] Valid URL: {href}")
 
-                      lower = href.lower()
-
-                      # Skip fake/ad links
-                      blocked = [
-                          "/register",
-                          "/login",
-                          "facebook",
-                          "twitter",
-                          "telegram",
-                          "instagram",
-                          "javascript:",
-                          "#"
-                      ]
-
-                      if any(x in lower for x in blocked):
-                          continue
-
-                      # Accept file-like links
-                      if re.search(
-                          r'\.(rar|zip|7z|mp4|mkv|avi|pdf|exe)(\?|$)',
-                          href,
-                          re.I
-                      ):
-                          print(f"Found file link: {href}")
                           return href
 
                   except:
@@ -147,104 +273,152 @@ jobs:
 
               return None
 
-          async def download_file(page, link):
-
-              os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-              print("Starting download...")
-
-              try:
-
-                  async with page.expect_download(timeout=120000) as download_info:
-
-                      await page.goto(link)
-
-                  download = await download_info.value
-
-                  filename = download.suggested_filename
-
-                  save_path = os.path.join(DOWNLOAD_DIR, filename)
-
-                  await download.save_as(save_path)
-
-                  print(f"Downloaded successfully: {save_path}")
-
-                  return True
-
-              except Exception as e:
-
-                  print("Download error:", e)
-
-                  return False
-
-          async def main():
-
-              page_url = os.environ["PAGE_URL"]
+          async def playwright_download(page_url):
 
               async with async_playwright() as p:
 
                   browser = await p.chromium.launch(
                       headless=True,
                       args=[
-                          "--disable-blink-features=AutomationControlled",
                           "--no-sandbox",
-                          "--disable-dev-shm-usage"
+                          "--disable-dev-shm-usage",
+                          "--disable-blink-features=AutomationControlled"
                       ]
                   )
 
                   context = await browser.new_context(
                       accept_downloads=True,
-                      viewport={"width": 1366, "height": 768},
-                      user_agent=(
-                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36"
-                      )
+                      user_agent=ua.random,
+                      viewport={"width": 1366, "height": 768}
                   )
 
                   page = await context.new_page()
 
-                  print(f"Opening page: {page_url}")
+                  print(f"[OPEN] {page_url}")
 
-                  try:
+                  await page.goto(
+                      page_url,
+                      wait_until="domcontentloaded",
+                      timeout=120000
+                  )
 
-                      await page.goto(
-                          page_url,
-                          wait_until="domcontentloaded",
-                          timeout=120000
-                      )
+                  await close_ads(context, page)
 
-                  except Exception as e:
-
-                      print("Page open failed:", e)
-
-                      await browser.close()
-
-                      return False
-
-                  await close_extra_pages(context, page)
-
-                  await click_free_download(page)
+                  await click_free(page)
 
                   await wait_countdown(page)
 
-                  await close_extra_pages(context, page)
+                  await close_ads(context, page)
 
-                  real_link = await find_real_download_link(page)
+                  ####################################################
+                  # METHOD 1: NETWORK SNIFF
+                  ####################################################
 
-                  if not real_link:
+                  link = await sniff_download_link(page)
 
-                      print("Could not find real download link")
+                  ####################################################
+                  # METHOD 2: HTML EXTRACTION
+                  ####################################################
+
+                  if not link:
+
+                      link = await extract_links(page)
+
+                  if not link:
+
+                      print("[ERROR] No real download link found")
 
                       await browser.close()
 
                       return False
 
-                  success = await download_file(page, real_link)
+                  print(f"[FOUND] {link}")
 
-                  await browser.close()
+                  ####################################################
+                  # METHOD 3: REQUESTS DOWNLOAD
+                  ####################################################
 
-                  return success
+                  try:
+
+                      direct_download(link)
+
+                      await browser.close()
+
+                      return True
+
+                  except Exception as e:
+
+                      print("[REQUESTS FAILED]", e)
+
+                  ####################################################
+                  # METHOD 4: PLAYWRIGHT DOWNLOAD FALLBACK
+                  ####################################################
+
+                  try:
+
+                      async with page.expect_download(
+                          timeout=120000
+                      ) as download_info:
+
+                          await page.goto(link)
+
+                      download = await download_info.value
+
+                      filename = download.suggested_filename
+
+                      path = DOWNLOAD_DIR / filename
+
+                      await download.save_as(path)
+
+                      print(f"[PLAYWRIGHT] Saved: {path}")
+
+                      await browser.close()
+
+                      return True
+
+                  except Exception as e:
+
+                      print("[PLAYWRIGHT FAILED]", e)
+
+                      await browser.close()
+
+                      return False
+
+          ############################################################
+          # RETRY SYSTEM
+          ############################################################
+
+          async def main():
+
+              page_url = os.environ["PAGE_URL"]
+
+              retries = 3
+
+              for attempt in range(1, retries + 1):
+
+                  try:
+
+                      print(f"\n========== ATTEMPT {attempt} ==========\n")
+
+                      success = await playwright_download(page_url)
+
+                      if success:
+
+                          print("\nSUCCESS\n")
+
+                          return True
+
+                  except Exception as e:
+
+                      print(f"[ATTEMPT FAILED] {e}")
+
+                  wait_time = attempt * 10
+
+                  print(f"Retrying in {wait_time}s")
+
+                  await asyncio.sleep(wait_time)
+
+              return False
 
           success = asyncio.run(main())
 
@@ -253,18 +427,18 @@ jobs:
 
           EOF
 
-      - name: Show downloaded files
+      - name: List downloaded files
         run: |
           echo "Downloaded files:"
           ls -lah dl || true
 
-      - name: Commit and push downloaded file
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add dl/
 
-          git commit -m "Add downloaded file [skip ci]" || echo "No changes to commit"
+          git commit -m "Add downloaded file [skip ci]" || echo "No changes"
 
           git push
