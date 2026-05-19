@@ -1,0 +1,120 @@
+name: Download Multiple Files from Direct Links
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'لینک‌های مستقیم فایل‌ها (با ویرگول یا خط جدید جدا کنید)'
+        required: true
+        type: string
+      split_size:
+        description: 'حداکثر حجم هر قسمت (مگابایت) - 0 برای عدم تقسیم'
+        required: false
+        type: number
+        default: 90
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 📁 Create dl folder
+        run: mkdir -p dl
+
+      - name: 🔧 Process and download all files
+        id: download
+        run: |
+          # تبدیل ورودی به آرایه (پشتیبانی از ویرگول و خط جدید)
+          INPUT="${{ github.event.inputs.urls }}"
+          # تبدیل ویرگول به خط جدید
+          INPUT=$(echo "$INPUT" | tr ',' '\n')
+          
+          SPLIT_SIZE="${{ github.event.inputs.split_size }}"
+          if [ -z "$SPLIT_SIZE" ] || [ "$SPLIT_SIZE" = "0" ]; then
+            SPLIT_SIZE=0
+          fi
+          
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+          
+          while IFS= read -r url; do
+            # حذف فاصله‌های اضافی
+            url=$(echo "$url" | xargs)
+            [ -z "$url" ] && continue
+            
+            echo "========================================"
+            echo "📥 Processing: $url"
+            
+            # استخراج نام فایل از لینک
+            FILENAME=$(basename "$url" | cut -d '?' -f1 | cut -d '#' -f1)
+            
+            # حذف پارامترهای اضافی از نام فایل
+            FILENAME=$(echo "$FILENAME" | sed 's/\?.*//')
+            
+            if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ]; then
+              FILENAME="downloaded_$(date +'%Y%m%d_%H%M%S')_$(echo "$url" | md5sum | cut -c1-8).bin"
+            fi
+            
+            echo "📄 Saving as: dl/$FILENAME"
+            
+            # دانلود فایل
+            if curl -L --retry 3 --retry-delay 2 --fail -o "dl/$FILENAME" "$url"; then
+              echo "✅ Download completed: $FILENAME"
+              
+              # بررسی و تقسیم فایل در صورت نیاز
+              if [ "$SPLIT_SIZE" != "0" ]; then
+                FILE="dl/$FILENAME"
+                SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
+                LIMIT_BYTES=$((SPLIT_SIZE * 1024 * 1024))
+                
+                if [ $SIZE -gt $LIMIT_BYTES ]; then
+                  echo "⚠️ File larger than ${SPLIT_SIZE}MB, splitting..."
+                  cd dl
+                  split -b ${SPLIT_SIZE}M "$FILENAME" "${FILENAME}.part."
+                  rm "$FILENAME"
+                  cd ..
+                  echo "✅ Split into parts"
+                fi
+              fi
+              
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+              echo "❌ Download failed: $FILENAME"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+            
+          done <<< "$INPUT"
+          
+          echo "========================================"
+          echo "📊 Summary: $SUCCESS_COUNT successful, $FAILED_COUNT failed"
+          echo "success_count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+          echo "failed_count=$FAILED_COUNT" >> $GITHUB_OUTPUT
+
+      - name: 📊 Show file info
+        run: |
+          echo "📁 Contents of dl folder:"
+          ls -lh dl/
+          
+          TOTAL_SIZE=$(du -sh dl/ 2>/dev/null | cut -f1 || echo "0")
+          FILE_COUNT=$(ls -1 dl/ 2>/dev/null | wc -l)
+          echo "📦 Total size: ${TOTAL_SIZE}"
+          echo "📄 Number of files: ${FILE_COUNT}"
+
+      - name: 📤 Commit and push to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ -d "dl" ] && [ "$(ls -A dl 2>/dev/null)" ]; then
+            git add dl/
+            git commit -m "Add downloaded files [skip ci]" || echo "No changes to commit"
+            git push
+            echo "✅ Files uploaded successfully"
+          else
+            echo "⚠️ No files to upload"
+          fi
