@@ -1,4 +1,4 @@
-name: UploadRAR Downloader Stable
+name: UploadRAR Network Sniffer Downloader
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
 
           playwright install chromium
 
-      - name: Download File
+      - name: Download
         env:
           PAGE_URL: ${{ github.event.inputs.page_url }}
         run: |
@@ -54,7 +54,9 @@ jobs:
 
           os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-          FILE_EXTENSIONS = (
+          ##########################################################
+
+          FILE_PATTERNS = [
               ".rar",
               ".zip",
               ".7z",
@@ -63,9 +65,9 @@ jobs:
               ".avi",
               ".pdf",
               ".exe"
-          )
+          ]
 
-          BLOCKED_DOMAINS = [
+          BLOCKED = [
               "register",
               "login",
               "facebook",
@@ -74,51 +76,35 @@ jobs:
               "instagram",
               "doubleclick",
               "googlesyndication",
-              "sheriffcybanninguntackle"
+              "ads"
           ]
 
           ##########################################################
 
-          def is_real_file_response(response):
+          def looks_like_file(url):
 
-              content_type = response.headers.get(
-                  "content-type",
-                  ""
-              ).lower()
-
-              content_disposition = response.headers.get(
-                  "content-disposition",
-                  ""
-              ).lower()
-
-              if "text/html" in content_type:
+              if not url:
                   return False
 
-              if "attachment" in content_disposition:
-                  return True
+              lower = url.lower()
 
-              if "application" in content_type:
-                  return True
+              if any(x in lower for x in BLOCKED):
+                  return False
 
-              if "video" in content_type:
-                  return True
-
-              return False
+              return any(x in lower for x in FILE_PATTERNS)
 
           ##########################################################
 
-          def try_direct_download(url):
+          def direct_download(url):
 
-              print(f"[REQUESTS] Testing: {url}")
+              print(f"[DOWNLOAD] {url}")
 
               scraper = cloudscraper.create_scraper()
 
               headers = {
                   "User-Agent": (
                       "Mozilla/5.0 "
-                      "(Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 "
-                      "Chrome/120 Safari/537.36"
+                      "(Windows NT 10.0; Win64; x64)"
                   ),
                   "Referer": "https://uploadrar.com/"
               }
@@ -126,20 +112,23 @@ jobs:
               response = scraper.get(
                   url,
                   headers=headers,
-                  allow_redirects=True,
                   stream=True,
+                  allow_redirects=True,
                   timeout=120
               )
 
-              final_url = response.url
+              content_type = response.headers.get(
+                  "content-type",
+                  ""
+              ).lower()
 
-              print(f"[REQUESTS] Final URL: {final_url}")
+              print("[CONTENT-TYPE]", content_type)
 
-              if not is_real_file_response(response):
+              if "text/html" in content_type:
 
-                  print("[REQUESTS] Not a real file")
-
-                  return False
+                  raise Exception(
+                      "Got HTML page instead of file"
+                  )
 
               filename = None
 
@@ -148,29 +137,27 @@ jobs:
                   ""
               )
 
-              match = re.search(
+              m = re.search(
                   r'filename="?([^"]+)"?',
                   cd
               )
 
-              if match:
-                  filename = match.group(1)
+              if m:
+                  filename = m.group(1)
 
               if not filename:
 
-                  parsed = urlparse(final_url)
+                  parsed = urlparse(response.url)
 
                   filename = os.path.basename(parsed.path)
 
               if not filename:
-                  filename = "downloaded_file.bin"
+                  filename = "download.bin"
 
               save_path = os.path.join(
                   DOWNLOAD_DIR,
                   filename
               )
-
-              print(f"[REQUESTS] Saving to {save_path}")
 
               with open(save_path, "wb") as f:
 
@@ -181,31 +168,7 @@ jobs:
                       if chunk:
                           f.write(chunk)
 
-              print("[REQUESTS] Download completed")
-
-              return True
-
-          ##########################################################
-
-          async def wait_countdown(page):
-
-              try:
-
-                  seconds = await page.locator(
-                      "#seconds"
-                  ).inner_text(timeout=5000)
-
-                  wait_time = int(seconds.strip())
-
-                  print(f"Countdown: {wait_time}s")
-
-                  await page.wait_for_timeout(
-                      wait_time * 1000
-                  )
-
-              except:
-
-                  print("No countdown")
+              print(f"[SAVED] {save_path}")
 
           ##########################################################
 
@@ -238,46 +201,33 @@ jobs:
 
           ##########################################################
 
-          async def extract_real_links(page):
+          async def wait_countdown(page):
 
-              links = await page.query_selector_all("a")
+              try:
 
-              valid_links = []
+                  txt = await page.locator(
+                      "#seconds"
+                  ).inner_text(timeout=5000)
 
-              for link in links:
+                  seconds = int(txt.strip())
 
-                  try:
+                  print(f"Countdown: {seconds}s")
 
-                      href = await link.get_attribute("href")
+                  await page.wait_for_timeout(
+                      seconds * 1000
+                  )
 
-                      if not href:
-                          continue
+              except:
 
-                      lower = href.lower()
-
-                      if any(
-                          x in lower
-                          for x in BLOCKED_DOMAINS
-                      ):
-                          continue
-
-                      if any(
-                          ext in lower
-                          for ext in FILE_EXTENSIONS
-                      ):
-
-                          valid_links.append(href)
-
-                  except:
-                      pass
-
-              return valid_links
+                  print("No countdown")
 
           ##########################################################
 
           async def main():
 
               page_url = os.environ["PAGE_URL"]
+
+              found_urls = []
 
               async with async_playwright() as p:
 
@@ -289,15 +239,43 @@ jobs:
                       ]
                   )
 
-                  context = await browser.new_context()
+                  context = await browser.new_context(
+                      accept_downloads=True
+                  )
 
                   page = await context.new_page()
+
+                  ##################################################
+                  # NETWORK SNIFFER
+                  ##################################################
+
+                  async def handle_response(response):
+
+                      try:
+
+                          url = response.url
+
+                          if looks_like_file(url):
+
+                              print(f"[NETWORK] {url}")
+
+                              found_urls.append(url)
+
+                      except:
+                          pass
+
+                  page.on(
+                      "response",
+                      handle_response
+                  )
+
+                  ##################################################
 
                   print(f"Opening page: {page_url}")
 
                   await page.goto(
                       page_url,
-                      wait_until="domcontentloaded",
+                      wait_until="networkidle",
                       timeout=120000
                   )
 
@@ -305,37 +283,54 @@ jobs:
 
                   await wait_countdown(page)
 
-                  print("Extracting links...")
+                  ##################################################
+                  # Trigger JS
+                  ##################################################
 
-                  links = await extract_real_links(page)
+                  await page.mouse.move(300, 400)
 
-                  print(f"Found {len(links)} candidate links")
+                  await page.mouse.click(300, 400)
 
-                  for link in links:
+                  await page.wait_for_timeout(10000)
 
-                      print(f"Testing link: {link}")
-
-                      try:
-
-                          success = try_direct_download(link)
-
-                          if success:
-
-                              print("SUCCESS")
-
-                              await browser.close()
-
-                              return
-
-                      except Exception as e:
-
-                          print("FAILED:", e)
+                  ##################################################
 
                   await browser.close()
 
-                  raise Exception(
-                      "No valid downloadable file found"
-                  )
+              ######################################################
+              # REMOVE DUPLICATES
+              ######################################################
+
+              unique = []
+
+              for u in found_urls:
+
+                  if u not in unique:
+                      unique.append(u)
+
+              print(f"Found {len(unique)} URLs")
+
+              ######################################################
+              # TRY DOWNLOAD
+              ######################################################
+
+              for url in unique:
+
+                  try:
+
+                      direct_download(url)
+
+                      print("SUCCESS")
+
+                      return
+
+                  except Exception as e:
+
+                      print("FAILED:", e)
+
+              raise Exception(
+                  "No downloadable file found"
+              )
 
           asyncio.run(main())
 
