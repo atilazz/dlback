@@ -1,10 +1,10 @@
-name: UploadRAR Network Sniffer Downloader
+name: UploadRAR Final Downloader
 
 on:
   workflow_dispatch:
     inputs:
       page_url:
-        description: 'UploadRAR URL'
+        description: "UploadRAR URL"
         required: true
         type: string
 
@@ -30,12 +30,11 @@ jobs:
 
           pip install \
             playwright \
-            requests \
-            cloudscraper
+            requests
 
           playwright install chromium
 
-      - name: Download
+      - name: Download File
         env:
           PAGE_URL: ${{ github.event.inputs.page_url }}
         run: |
@@ -45,9 +44,8 @@ jobs:
           import os
           import re
           import requests
-          import cloudscraper
 
-          from urllib.parse import urlparse
+          from urllib.parse import unquote, urlparse
           from playwright.async_api import async_playwright
 
           DOWNLOAD_DIR = "dl"
@@ -56,119 +54,22 @@ jobs:
 
           ##########################################################
 
-          FILE_PATTERNS = [
-              ".rar",
-              ".zip",
-              ".7z",
-              ".mp4",
-              ".mkv",
-              ".avi",
-              ".pdf",
-              ".exe"
-          ]
-
-          BLOCKED = [
-              "register",
-              "login",
-              "facebook",
-              "twitter",
-              "telegram",
-              "instagram",
-              "doubleclick",
-              "googlesyndication",
-              "ads"
-          ]
+          FILE_URL = None
 
           ##########################################################
 
-          def looks_like_file(url):
+          def filename_from_url(url):
 
-              if not url:
-                  return False
+              path = urlparse(url).path
 
-              lower = url.lower()
+              name = os.path.basename(path)
 
-              if any(x in lower for x in BLOCKED):
-                  return False
+              name = unquote(name)
 
-              return any(x in lower for x in FILE_PATTERNS)
+              if not name:
+                  name = "download.bin"
 
-          ##########################################################
-
-          def direct_download(url):
-
-              print(f"[DOWNLOAD] {url}")
-
-              scraper = cloudscraper.create_scraper()
-
-              headers = {
-                  "User-Agent": (
-                      "Mozilla/5.0 "
-                      "(Windows NT 10.0; Win64; x64)"
-                  ),
-                  "Referer": "https://uploadrar.com/"
-              }
-
-              response = scraper.get(
-                  url,
-                  headers=headers,
-                  stream=True,
-                  allow_redirects=True,
-                  timeout=120
-              )
-
-              content_type = response.headers.get(
-                  "content-type",
-                  ""
-              ).lower()
-
-              print("[CONTENT-TYPE]", content_type)
-
-              if "text/html" in content_type:
-
-                  raise Exception(
-                      "Got HTML page instead of file"
-                  )
-
-              filename = None
-
-              cd = response.headers.get(
-                  "content-disposition",
-                  ""
-              )
-
-              m = re.search(
-                  r'filename="?([^"]+)"?',
-                  cd
-              )
-
-              if m:
-                  filename = m.group(1)
-
-              if not filename:
-
-                  parsed = urlparse(response.url)
-
-                  filename = os.path.basename(parsed.path)
-
-              if not filename:
-                  filename = "download.bin"
-
-              save_path = os.path.join(
-                  DOWNLOAD_DIR,
-                  filename
-              )
-
-              with open(save_path, "wb") as f:
-
-                  for chunk in response.iter_content(
-                      chunk_size=1024 * 1024
-                  ):
-
-                      if chunk:
-                          f.write(chunk)
-
-              print(f"[SAVED] {save_path}")
+              return name
 
           ##########################################################
 
@@ -177,7 +78,8 @@ jobs:
               selectors = [
                   'button[name="method_free"]',
                   'input[name="method_free"]',
-                  'button:has-text("Free Download")'
+                  'button:has-text("Free Download")',
+                  'a:has-text("Free Download")'
               ]
 
               for selector in selectors:
@@ -194,10 +96,12 @@ jobs:
 
                           await page.wait_for_timeout(3000)
 
-                          return
+                          return True
 
                   except:
                       pass
+
+              return False
 
           ##########################################################
 
@@ -213,9 +117,11 @@ jobs:
 
                   print(f"Countdown: {seconds}s")
 
-                  await page.wait_for_timeout(
-                      seconds * 1000
-                  )
+                  for i in range(seconds, 0, -1):
+
+                      print(f"Waiting {i}s")
+
+                      await page.wait_for_timeout(1000)
 
               except:
 
@@ -225,9 +131,9 @@ jobs:
 
           async def main():
 
-              page_url = os.environ["PAGE_URL"]
+              global FILE_URL
 
-              found_urls = []
+              page_url = os.environ["PAGE_URL"]
 
               async with async_playwright() as p:
 
@@ -235,12 +141,20 @@ jobs:
                       headless=True,
                       args=[
                           "--no-sandbox",
-                          "--disable-dev-shm-usage"
+                          "--disable-dev-shm-usage",
+                          "--disable-blink-features=AutomationControlled"
                       ]
                   )
 
                   context = await browser.new_context(
-                      accept_downloads=True
+                      accept_downloads=True,
+                      user_agent=(
+                          "Mozilla/5.0 "
+                          "(Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) "
+                          "Chrome/148.0.0.0 Safari/537.36"
+                      )
                   )
 
                   page = await context.new_page()
@@ -251,31 +165,38 @@ jobs:
 
                   async def handle_response(response):
 
+                      global FILE_URL
+
                       try:
 
-                          url = response.url
+                          url = response.url.lower()
 
-                          if looks_like_file(url):
+                          if (
+                              "uploadrar.com:183" in url
+                              and (
+                                  ".rar" in url
+                                  or ".zip" in url
+                                  or ".7z" in url
+                              )
+                          ):
 
-                              print(f"[NETWORK] {url}")
+                              print(f"[FOUND FILE URL]")
+                              print(response.url)
 
-                              found_urls.append(url)
+                              FILE_URL = response.url
 
                       except:
                           pass
 
-                  page.on(
-                      "response",
-                      handle_response
-                  )
+                  page.on("response", handle_response)
 
                   ##################################################
 
-                  print(f"Opening page: {page_url}")
+                  print(f"Opening: {page_url}")
 
                   await page.goto(
                       page_url,
-                      wait_until="networkidle",
+                      wait_until="domcontentloaded",
                       timeout=120000
                   )
 
@@ -284,53 +205,94 @@ jobs:
                   await wait_countdown(page)
 
                   ##################################################
-                  # Trigger JS
+                  # Trigger requests
                   ##################################################
 
-                  await page.mouse.move(300, 400)
+                  await page.mouse.move(500, 400)
 
-                  await page.mouse.click(300, 400)
+                  await page.mouse.click(500, 400)
 
-                  await page.wait_for_timeout(10000)
+                  await page.wait_for_timeout(15000)
 
                   ##################################################
+
+                  if not FILE_URL:
+
+                      raise Exception(
+                          "Real file URL not found"
+                      )
+
+                  ##################################################
+                  # GET COOKIES
+                  ##################################################
+
+                  cookies = await context.cookies()
+
+                  cookie_header = "; ".join(
+                      f"{c['name']}={c['value']}"
+                      for c in cookies
+                  )
+
+                  ##################################################
+                  # DOWNLOAD
+                  ##################################################
+
+                  headers = {
+                      "User-Agent": (
+                          "Mozilla/5.0 "
+                          "(Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) "
+                          "Chrome/148.0.0.0 Safari/537.36"
+                      ),
+                      "Referer": "https://uploadrar.com/",
+                      "Cookie": cookie_header
+                  }
+
+                  print("Downloading real file...")
+
+                  response = requests.get(
+                      FILE_URL,
+                      headers=headers,
+                      stream=True,
+                      timeout=300,
+                      allow_redirects=True
+                  )
+
+                  print("Status:", response.status_code)
+
+                  content_type = response.headers.get(
+                      "content-type",
+                      ""
+                  )
+
+                  print("Content-Type:", content_type)
+
+                  if "text/html" in content_type.lower():
+
+                      raise Exception(
+                          "Server returned HTML instead of file"
+                      )
+
+                  filename = filename_from_url(FILE_URL)
+
+                  save_path = os.path.join(
+                      DOWNLOAD_DIR,
+                      filename
+                  )
+
+                  with open(save_path, "wb") as f:
+
+                      for chunk in response.iter_content(
+                          chunk_size=1024 * 1024
+                      ):
+
+                          if chunk:
+                              f.write(chunk)
+
+                  print(f"Saved: {save_path}")
 
                   await browser.close()
-
-              ######################################################
-              # REMOVE DUPLICATES
-              ######################################################
-
-              unique = []
-
-              for u in found_urls:
-
-                  if u not in unique:
-                      unique.append(u)
-
-              print(f"Found {len(unique)} URLs")
-
-              ######################################################
-              # TRY DOWNLOAD
-              ######################################################
-
-              for url in unique:
-
-                  try:
-
-                      direct_download(url)
-
-                      print("SUCCESS")
-
-                      return
-
-                  except Exception as e:
-
-                      print("FAILED:", e)
-
-              raise Exception(
-                  "No downloadable file found"
-              )
 
           asyncio.run(main())
 
