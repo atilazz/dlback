@@ -1,4 +1,4 @@
-name: UploadRAR Final Downloader
+name: UploadRAR Deep Sniffer
 
 on:
   workflow_dispatch:
@@ -16,25 +16,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          python -m pip install --upgrade pip
-
-          pip install \
-            playwright \
-            requests
-
+          pip install playwright requests
           playwright install chromium
 
-      - name: Download File
+      - name: Download
         env:
           PAGE_URL: ${{ github.event.inputs.page_url }}
         run: |
@@ -42,98 +35,16 @@ jobs:
 
           import asyncio
           import os
-          import re
           import requests
-
           from urllib.parse import unquote, urlparse
+
           from playwright.async_api import async_playwright
 
-          DOWNLOAD_DIR = "dl"
-
-          os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-          ##########################################################
-
           FILE_URL = None
-
-          ##########################################################
-
-          def filename_from_url(url):
-
-              path = urlparse(url).path
-
-              name = os.path.basename(path)
-
-              name = unquote(name)
-
-              if not name:
-                  name = "download.bin"
-
-              return name
-
-          ##########################################################
-
-          async def click_free(page):
-
-              selectors = [
-                  'button[name="method_free"]',
-                  'input[name="method_free"]',
-                  'button:has-text("Free Download")',
-                  'a:has-text("Free Download")'
-              ]
-
-              for selector in selectors:
-
-                  try:
-
-                      locator = page.locator(selector)
-
-                      if await locator.count() > 0:
-
-                          print(f"Clicking: {selector}")
-
-                          await locator.first.click()
-
-                          await page.wait_for_timeout(3000)
-
-                          return True
-
-                  except:
-                      pass
-
-              return False
-
-          ##########################################################
-
-          async def wait_countdown(page):
-
-              try:
-
-                  txt = await page.locator(
-                      "#seconds"
-                  ).inner_text(timeout=5000)
-
-                  seconds = int(txt.strip())
-
-                  print(f"Countdown: {seconds}s")
-
-                  for i in range(seconds, 0, -1):
-
-                      print(f"Waiting {i}s")
-
-                      await page.wait_for_timeout(1000)
-
-              except:
-
-                  print("No countdown")
-
-          ##########################################################
 
           async def main():
 
               global FILE_URL
-
-              page_url = os.environ["PAGE_URL"]
 
               async with async_playwright() as p:
 
@@ -141,76 +52,154 @@ jobs:
                       headless=True,
                       args=[
                           "--no-sandbox",
-                          "--disable-dev-shm-usage",
-                          "--disable-blink-features=AutomationControlled"
+                          "--disable-dev-shm-usage"
                       ]
                   )
 
                   context = await browser.new_context(
-                      accept_downloads=True,
-                      user_agent=(
-                          "Mozilla/5.0 "
-                          "(Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) "
-                          "Chrome/148.0.0.0 Safari/537.36"
-                      )
+                      accept_downloads=True
                   )
 
-                  page = await context.new_page()
-
                   ##################################################
-                  # NETWORK SNIFFER
+                  # GLOBAL REQUEST LOGGER
                   ##################################################
 
-                  async def handle_response(response):
+                  async def handle_request(request):
 
                       global FILE_URL
 
-                      try:
+                      url = request.url
 
-                          url = response.url.lower()
+                      print(f"[REQ] {url}")
 
-                          if (
-                              "uploadrar.com:183" in url
-                              and (
-                                  ".rar" in url
-                                  or ".zip" in url
-                                  or ".7z" in url
-                              )
-                          ):
+                      lower = url.lower()
 
-                              print(f"[FOUND FILE URL]")
-                              print(response.url)
+                      if (
+                          "uploadrar.com:183" in lower
+                          or lower.endswith(".rar")
+                          or lower.endswith(".zip")
+                          or lower.endswith(".7z")
+                      ):
 
-                              FILE_URL = response.url
+                          print(f"\n[FOUND FILE]\n{url}\n")
 
-                      except:
-                          pass
+                          FILE_URL = url
 
-                  page.on("response", handle_response)
+                  context.on(
+                      "request",
+                      handle_request
+                  )
 
                   ##################################################
+                  # POPUP CAPTURE
+                  ##################################################
+
+                  async def popup_handler(popup):
+
+                      print("[POPUP OPENED]")
+
+                      async def popup_req(req):
+
+                          global FILE_URL
+
+                          url = req.url
+
+                          print(f"[POPUP REQ] {url}")
+
+                          lower = url.lower()
+
+                          if (
+                              "uploadrar.com:183" in lower
+                              or ".rar" in lower
+                              or ".zip" in lower
+                          ):
+
+                              print(f"\n[FOUND IN POPUP]\n{url}\n")
+
+                              FILE_URL = url
+
+                      popup.on(
+                          "request",
+                          popup_req
+                      )
+
+                  page = await context.new_page()
+
+                  page.on("popup", popup_handler)
+
+                  ##################################################
+
+                  page_url = os.environ["PAGE_URL"]
 
                   print(f"Opening: {page_url}")
 
                   await page.goto(
                       page_url,
-                      wait_until="domcontentloaded",
+                      wait_until="networkidle",
                       timeout=120000
                   )
 
-                  await click_free(page)
-
-                  await wait_countdown(page)
-
                   ##################################################
-                  # Trigger requests
+                  # CLICK FREE
                   ##################################################
 
-                  await page.mouse.move(500, 400)
+                  selectors = [
+                      'button[name="method_free"]',
+                      'input[name="method_free"]',
+                      'button:has-text("Free Download")'
+                  ]
 
-                  await page.mouse.click(500, 400)
+                  for selector in selectors:
+
+                      try:
+
+                          locator = page.locator(selector)
+
+                          if await locator.count() > 0:
+
+                              print(f"Clicking: {selector}")
+
+                              await locator.first.click()
+
+                              break
+
+                      except:
+                          pass
+
+                  ##################################################
+                  # WAIT COUNTDOWN
+                  ##################################################
+
+                  try:
+
+                      txt = await page.locator(
+                          "#seconds"
+                      ).inner_text(timeout=5000)
+
+                      seconds = int(txt.strip())
+
+                      print(f"Countdown: {seconds}s")
+
+                      await page.wait_for_timeout(
+                          seconds * 1000
+                      )
+
+                  except:
+                      pass
+
+                  ##################################################
+                  # FORCE USER ACTIONS
+                  ##################################################
+
+                  for _ in range(5):
+
+                      await page.mouse.move(400, 400)
+
+                      await page.mouse.click(400, 400)
+
+                      await page.wait_for_timeout(2000)
+
+                  ##################################################
 
                   await page.wait_for_timeout(15000)
 
@@ -219,12 +208,28 @@ jobs:
                   if not FILE_URL:
 
                       raise Exception(
-                          "Real file URL not found"
+                          "No real file URL captured"
                       )
 
                   ##################################################
-                  # GET COOKIES
+                  # DOWNLOAD
                   ##################################################
+
+                  os.makedirs("dl", exist_ok=True)
+
+                  filename = os.path.basename(
+                      urlparse(FILE_URL).path
+                  )
+
+                  filename = unquote(filename)
+
+                  if not filename:
+                      filename = "download.bin"
+
+                  save_path = os.path.join(
+                      "dl",
+                      filename
+                  )
 
                   cookies = await context.cookies()
 
@@ -233,23 +238,16 @@ jobs:
                       for c in cookies
                   )
 
-                  ##################################################
-                  # DOWNLOAD
-                  ##################################################
-
                   headers = {
                       "User-Agent": (
                           "Mozilla/5.0 "
-                          "(Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) "
-                          "Chrome/148.0.0.0 Safari/537.36"
+                          "(Windows NT 10.0; Win64; x64)"
                       ),
                       "Referer": "https://uploadrar.com/",
                       "Cookie": cookie_header
                   }
 
-                  print("Downloading real file...")
+                  print(f"Downloading: {FILE_URL}")
 
                   response = requests.get(
                       FILE_URL,
@@ -259,26 +257,16 @@ jobs:
                       allow_redirects=True
                   )
 
-                  print("Status:", response.status_code)
-
-                  content_type = response.headers.get(
-                      "content-type",
-                      ""
+                  print(
+                      "STATUS:",
+                      response.status_code
                   )
 
-                  print("Content-Type:", content_type)
-
-                  if "text/html" in content_type.lower():
-
-                      raise Exception(
-                          "Server returned HTML instead of file"
+                  print(
+                      "CONTENT:",
+                      response.headers.get(
+                          "content-type"
                       )
-
-                  filename = filename_from_url(FILE_URL)
-
-                  save_path = os.path.join(
-                      DOWNLOAD_DIR,
-                      filename
                   )
 
                   with open(save_path, "wb") as f:
@@ -298,11 +286,11 @@ jobs:
 
           EOF
 
-      - name: Show files
+      - name: Show Files
         run: |
           ls -lah dl || true
 
-      - name: Commit and Push
+      - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
