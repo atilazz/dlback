@@ -1,4 +1,4 @@
-name: Download from UploadRAR
+name: Download from UploadRAR with yt-dlp
 
 on:
   workflow_dispatch:
@@ -7,216 +7,26 @@ on:
         description: 'URL of UploadRAR download page'
         required: true
         type: string
-        default: 'https://uploadrar.com/lsy90ncgkak3'
-      filename:
-        description: 'Output filename (optional)'
-        required: false
-        type: string
-        default: ''
-
-permissions:
-  contents: write
 
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+      
+      - name: Install yt-dlp
         run: |
-          pip install requests beautifulsoup4
-
-      - name: Download file from UploadRAR
-        env:
-          PAGE_URL: ${{ github.event.inputs.page_url }}
-          OUTPUT_NAME: ${{ github.event.inputs.filename }}
+          pip install yt-dlp
+      
+      - name: Download file
         run: |
-          python << 'EOF'
-          import requests
-          import time
-          import re
-          import os
-          from bs4 import BeautifulSoup
-          from urllib.parse import urljoin, urlparse
-
-          def extract_filename_from_url(url):
-              parsed = urlparse(url)
-              path = parsed.path
-              # Extract last part of the path
-              filename = path.split('/')[-1]
-              if not filename:
-                  filename = 'downloaded_file'
-              return filename
-
-          def download_from_uploadrar(page_url, output_filename=None):
-              # Headers to mimic a real browser
-              headers = {
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                  'Accept-Language': 'en-US,en;q=0.9',
-                  'Referer': 'https://uploadrar.com/',
-              }
-              session = requests.Session()
-              session.headers.update(headers)
-
-              try:
-                  # 1. Get the initial download page
-                  print(f"Fetching page: {page_url}")
-                  resp = session.get(page_url, timeout=30)
-                  resp.raise_for_status()
-                  soup = BeautifulSoup(resp.text, 'html.parser')
-
-                  # 2. Find and click the "Free Download" button (submit form)
-                  form = soup.find('form', {'method': 'post'})
-                  if not form:
-                      print("No form found. Maybe the structure changed.")
-                      return False
-
-                  # Extract form action URL or use current page
-                  action_url = form.get('action', page_url)
-                  if action_url.startswith('/'):
-                      action_url = urljoin(page_url, action_url)
-
-                  # Find the "Free Download" button to get its name/value
-                  free_btn = soup.find('button', {'name': 'method_free', 'value': 'Free Download'})
-                  if not free_btn:
-                      # Try alternate selectors
-                      free_btn = soup.find('button', string=re.compile(r'Free Download', re.I))
-                  if not free_btn:
-                      free_btn = soup.find('input', {'value': 'Free Download'})
-                  
-                  if not free_btn:
-                      print("Free Download button not found.")
-                      return False
-
-                  # Prepare form data
-                  form_data = {}
-                  for input_tag in form.find_all(['input', 'button']):
-                      name = input_tag.get('name')
-                      value = input_tag.get('value', '')
-                      if name:
-                          form_data[name] = value
-                  
-                  # Override with the free download button's name/value
-                  form_data['method_free'] = 'Free Download'
-
-                  print("Submitting free download form...")
-                  resp2 = session.post(action_url, data=form_data, headers=headers)
-                  resp2.raise_for_status()
-                  soup2 = BeautifulSoup(resp2.text, 'html.parser')
-
-                  # 3. Wait for countdown and extract direct link
-                  # The page may have a countdown element or a direct download button
-                  # Look for the download button with id "downloadbtn" or similar
-                  download_btn = soup2.find('button', {'id': 'downloadbtn'})
-                  if not download_btn:
-                      download_btn = soup2.find('a', {'class': 'btn-primary'}, href=re.compile(r'\.(rar|zip|mp4|exe|pdf|7z)'))
-                  
-                  # Check for countdown element
-                  countdown_el = soup2.find('span', {'id': 'seconds'})
-                  if countdown_el:
-                      try:
-                          wait_time = int(countdown_el.text.strip())
-                      except:
-                          wait_time = 15  # fallback
-                      print(f"Waiting for {wait_time} seconds (countdown)...")
-                      time.sleep(wait_time + 2)  # add a couple extra seconds
-                      # After countdown, the page may redirect or show a direct link
-                      # Refresh the page or look for updated elements
-                      resp3 = session.get(page_url, headers=headers)
-                      resp3.raise_for_status()
-                      soup3 = BeautifulSoup(resp3.text, 'html.parser')
-                      # Look for direct link
-                      direct_link = None
-                      link_tag = soup3.find('a', href=re.compile(r'https?://fs\d+\.uploadrar\.com:\d+/d/'))
-                      if not link_tag:
-                          link_tag = soup3.find('a', class_='btn-primary')
-                      if link_tag and link_tag.get('href'):
-                          direct_link = link_tag['href']
-                  else:
-                      # Try to find direct link directly
-                      direct_link = None
-                      link_tag = soup2.find('a', href=re.compile(r'https?://fs\d+\.uploadrar\.com:\d+/d/'))
-                      if not link_tag:
-                          link_tag = soup2.find('a', class_='btn-primary')
-                      if link_tag and link_tag.get('href'):
-                          direct_link = link_tag['href']
-
-                  if not direct_link:
-                      # Also check for any link that looks like a direct download
-                      all_links = soup2.find_all('a', href=True)
-                      for link in all_links:
-                          href = link['href']
-                          if any(ext in href.lower() for ext in ['.rar', '.zip', '.mp4', '.exe', '.pdf', '.7z']):
-                              direct_link = href
-                              break
-                  
-                  if not direct_link:
-                      print("Could not find direct download link.")
-                      return False
-
-                  # If direct link is relative, make it absolute
-                  if direct_link.startswith('/'):
-                      direct_link = urljoin(page_url, direct_link)
-
-                  print(f"Direct link found: {direct_link}")
-
-                  # Determine output filename
-                  if not output_filename:
-                      output_filename = extract_filename_from_url(direct_link)
-                      # Fallback to filename from page
-                      if not output_filename or output_filename == 'downloaded_file':
-                          filename_elem = soup2.find('b', string=re.compile(r'\.(rar|zip|mp4|exe|pdf|7z)'))
-                          if filename_elem:
-                              output_filename = filename_elem.text.strip()
-                          else:
-                              output_filename = 'uploadrar_download.bin'
-
-                  # Ensure it has a valid extension
-                  if not any(output_filename.lower().endswith(ext) for ext in ['.rar', '.zip', '.mp4', '.exe', '.pdf', '.7z', '.bin']):
-                      output_filename += '.rar'  # default extension
-
-                  # Download the file
-                  print(f"Downloading to: dl/{output_filename}")
-                  os.makedirs('dl', exist_ok=True)
-                  file_resp = session.get(direct_link, stream=True, timeout=120)
-                  file_resp.raise_for_status()
-                  
-                  total_size = int(file_resp.headers.get('content-length', 0))
-                  downloaded = 0
-                  with open(f'dl/{output_filename}', 'wb') as f:
-                      for chunk in file_resp.iter_content(chunk_size=8192):
-                          if chunk:
-                              f.write(chunk)
-                              downloaded += len(chunk)
-                              if total_size:
-                                  percent = (downloaded / total_size) * 100
-                                  print(f"\rProgress: {percent:.1f}%", end='', flush=True)
-                  print(f"\nDownload completed: dl/{output_filename}")
-                  return True
-
-              except Exception as e:
-                  print(f"Error: {e}")
-                  return False
-
-          # Run the download
-          page_url = os.environ.get('PAGE_URL', 'https://uploadrar.com/lsy90ncgkak3')
-          output_name = os.environ.get('OUTPUT_NAME', '')
-          if not download_from_uploadrar(page_url, output_name):
-              exit(1)
-          EOF
-
+          mkdir -p dl
+          yt-dlp -o "dl/%(title)s.%(ext)s" "${{ github.event.inputs.page_url }}"
+      
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add dl/
-          git commit -m "Add downloaded file from UploadRAR [skip ci]" || echo "No changes to commit"
+          git commit -m "Download from UploadRAR [skip ci]" || echo "No changes"
           git push
