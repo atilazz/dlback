@@ -23,97 +23,69 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          pip install cloudscraper requests beautifulsoup4
-
-      - name: Bypass all links
+      - name: Bypass all links using API
         run: |
           mkdir -p dl
           python3 << 'EOF'
-          import cloudscraper
-          import re
+          import requests
           import os
           import time
-          from urllib.parse import urlparse
+          import json
 
-          def bypass_ouo(url, max_retries=3):
+          API_URL = "https://bypass.pm/api/v1/bypass"
+
+          def bypass_ouo_api(short_url, max_retries=2):
               """
-              عبور از لینک‌های ouo.io و ouo.press
-              بازگشت: لینک نهایی یا None در صورت خطا
+              Bypass ouo.io and ouo.press links using bypass.pm API
               """
-              scraper = cloudscraper.create_scraper(
-                  browser={
-                      'browser': 'chrome',
-                      'platform': 'windows',
-                      'mobile': False
-                  }
-              )
-              
               headers = {
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                  'Accept-Language': 'en-US,en;q=0.9',
-                  'Referer': 'https://google.com/',
+                  'Accept': 'application/json',
+                  'Content-Type': 'application/json',
+                  'Origin': 'https://bypass.pm',
+                  'Referer': 'https://bypass.pm/'
               }
+              
+              data = {"url": short_url}
               
               for attempt in range(max_retries):
                   try:
-                      # دریافت صفحه اول
-                      resp = scraper.get(url, headers=headers, timeout=30)
-                      resp.raise_for_status()
+                      response = requests.post(API_URL, json=data, headers=headers, timeout=45)
                       
-                      # استخراج لینک نهایی از پاسخ
-                      # روش 1: بررسی ریدایرکت نهایی
-                      if resp.history:
-                          final_url = resp.url
-                          if not final_url.startswith('https://ouo.'):
-                              return final_url
-                      
-                      # روش 2: جستجو در محتوای صفحه
-                      html = resp.text
-                      
-                      # جستجو برای لینک مقصد
-                      patterns = [
-                          r'window\.location\.href\s*=\s*["\']([^"\']+)["\']',
-                          r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\']\d+;\s*url=([^"\']+)["\']',
-                          r'href=["\']([^"\']+)["\']\s+class=["\']btn["\']',
-                          r'var\s+clickURL\s*=\s*["\']([^"\']+)["\']',
-                          r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>.*?(?:Download|here|link|click)',
-                      ]
-                      
-                      for pattern in patterns:
-                          match = re.search(pattern, html, re.IGNORECASE)
-                          if match:
-                              final_url = match.group(1)
-                              if final_url and not final_url.startswith('https://ouo.'):
-                                  if final_url.startswith('/'):
-                                      parsed = urlparse(url)
-                                      final_url = f"{parsed.scheme}://{parsed.netloc}{final_url}"
-                                  return final_url
-                      
-                      # روش 3: بررسی iframe
-                      iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', html)
-                      if iframe_match:
-                          iframe_url = iframe_match.group(1)
-                          if 'ouo' not in iframe_url:
-                              return iframe_url
-                      
-                      # روش 4: استفاده از API جایگزین (در صورت نیاز)
-                      # صبر کوتاه برای جلوگیری از مسدودیت
+                      if response.status_code == 200:
+                          result = response.json()
+                          if result.get('success') and result.get('destination'):
+                              return result.get('destination')
+                          else:
+                              error_msg = result.get('message', 'Unknown error')
+                              print(f"      API Error: {error_msg}")
+                              if attempt == max_retries - 1:
+                                  return None
+                      elif response.status_code == 429:
+                          print(f"      Rate limited, waiting 5 seconds...")
+                          time.sleep(5)
+                      else:
+                          print(f"      HTTP {response.status_code}")
+                          if attempt == max_retries - 1:
+                              return None
+                              
+                  except requests.exceptions.Timeout:
+                      print(f"      Timeout, retrying...")
                       time.sleep(2)
-                      
                   except Exception as e:
-                      print(f"      تلاش {attempt+1} خطا: {str(e)[:50]}")
-                      time.sleep(3)
+                      print(f"      Error: {str(e)[:50]}")
+                      if attempt == max_retries - 1:
+                          return None
+                  
+                  time.sleep(1)
               
               return None
 
-          # خواندن لینک‌های ورودی
+          # Read input links
           raw_input = os.environ.get('LINKS_INPUT', '')
           links = [line.strip() for line in raw_input.split('\n') if line.strip()]
           
-          print(f"🔍 تعداد لینک‌های دریافتی: {len(links)}")
+          print(f"🔍 Total links received: {len(links)}")
           print("=" * 60)
           
           results = []
@@ -121,9 +93,9 @@ jobs:
           fail_count = 0
           
           for idx, short_link in enumerate(links, 1):
-              print(f"\n📥 [{idx}/{len(links)}] پردازش: {short_link}")
+              print(f"\n📥 [{idx}/{len(links)}] Processing: {short_link}")
               
-              final_url = bypass_ouo(short_link)
+              final_url = bypass_ouo_api(short_link)
               
               if final_url:
                   results.append({
@@ -132,7 +104,7 @@ jobs:
                       'status': 'success'
                   })
                   success_count += 1
-                  print(f"   ✅ لینک اصلی: {final_url[:100]}{'...' if len(final_url) > 100 else ''}")
+                  print(f"   ✅ Destination: {final_url[:100]}{'...' if len(final_url) > 100 else ''}")
               else:
                   results.append({
                       'original': short_link,
@@ -140,18 +112,18 @@ jobs:
                       'status': 'failed'
                   })
                   fail_count += 1
-                  print(f"   ❌ خطا: Unable to bypass")
+                  print(f"   ❌ Failed to bypass")
               
-              # تأخیر بین درخواست‌ها
-              time.sleep(1)
+              # Small delay between requests
+              time.sleep(0.5)
           
-          # ذخیره نتایج در فایل link.txt در پوشه dl
+          # Save results to dl/link.txt
           with open('dl/link.txt', 'w', encoding='utf-8') as f:
               f.write("=" * 80 + "\n")
-              f.write(f"تاریخ: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-              f.write(f"تعداد کل لینک‌ها: {len(links)}\n")
-              f.write(f"تعداد موفق: {success_count}\n")
-              f.write(f"تعداد ناموفق: {fail_count}\n")
+              f.write(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+              f.write(f"Total links: {len(links)}\n")
+              f.write(f"Success: {success_count}\n")
+              f.write(f"Failed: {fail_count}\n")
               f.write("=" * 80 + "\n\n")
               
               for result in results:
@@ -162,17 +134,17 @@ jobs:
                       f.write(f"{result['original']}\n")
                       f.write(f"  └─ FAILED\n\n")
           
-          # ذخیره فقط لینک‌های موفق در فایل جداگانه
+          # Save only successful links
           with open('dl/successful_links.txt', 'w', encoding='utf-8') as f:
               for result in results:
                   if result['status'] == 'success':
                       f.write(f"{result['final']}\n")
           
           print("\n" + "=" * 60)
-          print(f"📊 خلاصه: {success_count} موفق, {fail_count} ناموفق")
-          print("📁 نتایج در پوشه dl ذخیره شد:")
-          print("   - dl/link.txt (جزئیات کامل)")
-          print("   - dl/successful_links.txt (فقط لینک‌های موفق)")
+          print(f"📊 Summary: {success_count} successful, {fail_count} failed")
+          print("📁 Results saved to dl folder:")
+          print("   - dl/link.txt (full details)")
+          print("   - dl/successful_links.txt (only successful links)")
           EOF
         env:
           LINKS_INPUT: ${{ github.event.inputs.links }}
@@ -182,5 +154,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add dl/
-          git commit -m "Add bypassed links [skip ci]" || echo "No changes to commit"
+          git commit -m "Bypass ouo links [skip ci]" || echo "No changes to commit"
           git push
