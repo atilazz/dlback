@@ -7,7 +7,6 @@ on:
         description: 'لینک‌های صفحات حاوی ویدیو (با ویرگول، فاصله یا خط جدید جدا کنید)'
         required: true
         type: string
-        default: 'https://videzz.net/rg9sj2tyb7yy.html'
 
 permissions:
   contents: write
@@ -24,8 +23,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install yt-dlp
-        run: pip install yt-dlp
+      - name: Install yt-dlp with curl_cffi (impersonation support)
+        run: |
+          pip install yt-dlp
+          pip install curl_cffi
 
       - name: Download videos
         run: |
@@ -34,13 +35,11 @@ jobs:
           import os
           import re
           import subprocess
-          from urllib.parse import urlparse
+          import time
 
           def get_unique_filename(base_path):
-              """اگر فایل وجود داشت، شماره به انتهای نام اضافه کن"""
               if not os.path.exists(base_path):
                   return base_path
-              
               name, ext = os.path.splitext(base_path)
               counter = 1
               while True:
@@ -50,13 +49,40 @@ jobs:
                   counter += 1
 
           def sanitize_filename(filename):
-              """حذف کاراکترهای غیرمجاز از نام فایل"""
               return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
-          # دریافت و تجزیه لینک‌ها
+          def download_with_ytdlp(url, output_template):
+              """دانلود با استفاده از yt-dlp با تنظیمات impersonation"""
+              cmd = [
+                  'yt-dlp',
+                  '-o', output_template,
+                  '--no-warnings',
+                  '--impersonate', 'chrome-120',  # impersonate as Chrome 120
+                  '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  '--add-header', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                  '--add-header', 'Accept-Language: en-US,en;q=0.9',
+                  '--add-header', 'Accept-Encoding: gzip, deflate, br',
+                  '--add-header', 'Connection: keep-alive',
+                  '--add-header', 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                  '--add-header', 'Sec-Ch-Ua-Mobile: ?0',
+                  '--add-header', 'Sec-Ch-Ua-Platform: "Windows"',
+                  '--add-header', 'Sec-Fetch-Dest: document',
+                  '--add-header', 'Sec-Fetch-Mode: navigate',
+                  '--add-header', 'Sec-Fetch-Site: none',
+                  '--add-header', 'Sec-Fetch-User: ?1',
+                  '--add-header', 'Upgrade-Insecure-Requests: 1',
+                  '--retries', '5',
+                  '--fragment-retries', '5',
+                  '--sleep-requests', '2',
+                  '--sleep-interval', '3',
+                  '--max-sleep-interval', '5',
+                  url
+              ]
+              
+              result = subprocess.run(cmd, capture_output=True, text=True)
+              return result.returncode == 0, result.stderr
+
           raw_input = os.environ.get('URLS_INPUT', '')
-          
-          # تبدیل ویرگول، فاصله، تب و خط جدید به جداکننده
           urls = re.split(r'[,\s\n]+', raw_input)
           urls = [u.strip() for u in urls if u.strip() and u.strip().startswith('http')]
           
@@ -68,82 +94,48 @@ jobs:
           for idx, url in enumerate(urls, 1):
               print(f"\n📥 پردازش {idx}/{len(urls)}: {url}")
               
-              try:
-                  # اجرای yt-dlp برای دریافت اطلاعات ویدیو
-                  # ابتدا عنوان ویدیو را دریافت می‌کنیم
-                  cmd_info = [
-                      'yt-dlp', '--get-title', '--no-warnings',
-                      '--referer', 'https://videzz.net/', url
-                  ]
-                  result = subprocess.run(cmd_info, capture_output=True, text=True)
-                  
-                  if result.returncode != 0:
-                      print(f"   ❌ خطا در دریافت اطلاعات: {result.stderr[:200]}")
-                      fail_count += 1
-                      continue
-                  
-                  title = result.stdout.strip()
-                  if not title:
-                      title = f"video_{idx}"
-                  
-                  # ساخت نام فایل
-                  safe_title = sanitize_filename(title)
-                  ext = '.mp4'  # پیش‌فرض
-                  
-                  # دانلود ویدیو با نام موقت برای تشخیص پسوند واقعی
-                  temp_pattern = f"dl/temp_{idx}_%(title)s.%(ext)s"
-                  cmd_download = [
-                      'yt-dlp', '-o', temp_pattern, '--no-warnings',
-                      '--referer', 'https://videzz.net/', url
-                  ]
-                  
-                  subprocess.run(cmd_download, capture_output=True)
-                  
-                  # پیدا کردن فایل دانلود شده
-                  downloaded_file = None
-                  for f in os.listdir('dl'):
-                      if f.startswith(f'temp_{idx}_'):
-                          downloaded_file = f
-                          break
-                  
-                  if downloaded_file:
-                      # استخراج پسوند واقعی
-                      _, ext = os.path.splitext(downloaded_file)
-                      final_filename = f"{safe_title}{ext}"
-                      final_path = os.path.join('dl', final_filename)
-                      
-                      # بررسی وجود فایل تکراری
-                      final_path = get_unique_filename(final_path)
-                      final_filename = os.path.basename(final_path)
-                      
-                      # تغییر نام فایل
-                      os.rename(os.path.join('dl', downloaded_file), final_path)
-                      print(f"   ✅ دانلود شد: {final_filename}")
-                      success_count += 1
-                  else:
-                      # fallback: مستقیماً با نام ساده دانلود کن
-                      output_template = f"dl/%(title)s.%(ext)s"
-                      cmd_download2 = [
-                          'yt-dlp', '-o', output_template, '--no-warnings',
-                          '--referer', 'https://videzz.net/', url
-                      ]
-                      subprocess.run(cmd_download2)
-                      
-                      # بررسی فایل‌های دانلود شده
-                      for f in os.listdir('dl'):
-                          if f.endswith('.mp4') or f.endswith('.mkv') or f.endswith('.webm'):
-                              if 'temp' not in f:
-                                  old_path = os.path.join('dl', f)
-                                  new_path = get_unique_filename(old_path)
-                                  if old_path != new_path:
-                                      os.rename(old_path, new_path)
-                                  print(f"   ✅ دانلود شد: {os.path.basename(new_path)}")
-                                  success_count += 1
-                                  break
-                          
-              except Exception as e:
-                  print(f"   ❌ خطا: {e}")
+              # ابتدا عنوان ویدیو را دریافت می‌کنیم
+              cmd_info = [
+                  'yt-dlp', '--get-title', '--no-warnings',
+                  '--impersonate', 'chrome-120', url
+              ]
+              result = subprocess.run(cmd_info, capture_output=True, text=True)
+              
+              if result.returncode != 0:
+                  print(f"   ❌ خطا: {result.stderr[:200]}")
                   fail_count += 1
+                  continue
+              
+              title = result.stdout.strip()
+              if not title:
+                  title = f"video_{idx}"
+              
+              safe_title = sanitize_filename(title)
+              output_template = f"dl/{safe_title}.%(ext)s"
+              
+              success, error = download_with_ytdlp(url, output_template)
+              
+              if success:
+                  # بررسی فایل‌های دانلود شده
+                  for f in os.listdir('dl'):
+                      if f.startswith(safe_title) or (f.endswith('.mp4') and idx in f):
+                          old_path = os.path.join('dl', f)
+                          new_path = get_unique_filename(old_path)
+                          if old_path != new_path:
+                              os.rename(old_path, new_path)
+                              print(f"   ✅ دانلود شد: {os.path.basename(new_path)}")
+                          else:
+                              print(f"   ✅ دانلود شد: {f}")
+                          success_count += 1
+                          break
+                  else:
+                      print(f"   ⚠️ دانلود شد اما فایل یافت نشد")
+                      success_count += 1
+              else:
+                  print(f"   ❌ خطا در دانلود: {error[:200]}")
+                  fail_count += 1
+              
+              time.sleep(2)  # تأخیر بین درخواست‌ها
           
           print(f"\n📊 خلاصه: {success_count} موفق, {fail_count} ناموفق")
           EOF
@@ -153,7 +145,7 @@ jobs:
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config.user.email "github-actions[bot]@users.noreply.github.com"
           git add dl/
           git commit -m "Add downloaded videos [skip ci]" || echo "No changes to commit"
           git push
