@@ -1,4 +1,4 @@
-name: Bypass ouo.io and ouo.press Links
+name: Bypass ouo.io/ouo.press Links
 
 on:
   workflow_dispatch:
@@ -18,140 +18,47 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout ouo-bypass script
+        uses: actions/checkout@v4
+        with:
+          repository: B3H1Z/ouo-link-bypass
+          path: ouo-bypass
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install requests
-        run: pip install requests
+      - name: Install dependencies
+        run: |
+          cd ouo-bypass
+          pip install -r requirements.txt
+          cd ..
 
-      - name: Bypass all links using API
+      - name: Bypass links
         run: |
           mkdir -p dl
-          python3 << 'EOF'
-          import requests
-          import os
-          import time
-          import json
-
-          API_URL = "https://bypass.pm/api/v1/bypass"
-
-          def bypass_ouo_api(short_url, max_retries=2):
-              """
-              Bypass ouo.io and ouo.press links using bypass.pm API
-              """
-              headers = {
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Accept': 'application/json',
-                  'Content-Type': 'application/json',
-                  'Origin': 'https://bypass.pm',
-                  'Referer': 'https://bypass.pm/'
-              }
-              
-              data = {"url": short_url}
-              
-              for attempt in range(max_retries):
-                  try:
-                      response = requests.post(API_URL, json=data, headers=headers, timeout=45)
-                      
-                      if response.status_code == 200:
-                          result = response.json()
-                          if result.get('success') and result.get('destination'):
-                              return result.get('destination')
-                          else:
-                              error_msg = result.get('message', 'Unknown error')
-                              print(f"      API Error: {error_msg}")
-                              if attempt == max_retries - 1:
-                                  return None
-                      elif response.status_code == 429:
-                          print(f"      Rate limited, waiting 5 seconds...")
-                          time.sleep(5)
-                      else:
-                          print(f"      HTTP {response.status_code}")
-                          if attempt == max_retries - 1:
-                              return None
-                              
-                  except requests.exceptions.Timeout:
-                      print(f"      Timeout, retrying...")
-                      time.sleep(2)
-                  except Exception as e:
-                      print(f"      Error: {str(e)[:50]}")
-                      if attempt == max_retries - 1:
-                          return None
-                  
-                  time.sleep(1)
-              
-              return None
-
-          # Read input links
-          raw_input = os.environ.get('LINKS_INPUT', '')
-          links = [line.strip() for line in raw_input.split('\n') if line.strip()]
+          cd ouo-bypass
           
-          print(f"🔍 Total links received: {len(links)}")
-          print("=" * 60)
+          # تبدیل لینک‌های ورودی به آرگومان
+          LINKS_ARGS=$(echo "${{ github.event.inputs.links }}" | tr '\n' ' ')
           
-          results = []
-          success_count = 0
-          fail_count = 0
+          # اجرای اسکریپت برای همه لینک‌ها
+          python ouo_bypass.py $LINKS_ARGS | tee ../dl/output.txt
           
-          for idx, short_link in enumerate(links, 1):
-              print(f"\n📥 [{idx}/{len(links)}] Processing: {short_link}")
-              
-              final_url = bypass_ouo_api(short_link)
-              
-              if final_url:
-                  results.append({
-                      'original': short_link,
-                      'final': final_url,
-                      'status': 'success'
-                  })
-                  success_count += 1
-                  print(f"   ✅ Destination: {final_url[:100]}{'...' if len(final_url) > 100 else ''}")
-              else:
-                  results.append({
-                      'original': short_link,
-                      'final': 'FAILED',
-                      'status': 'failed'
-                  })
-                  fail_count += 1
-                  print(f"   ❌ Failed to bypass")
-              
-              # Small delay between requests
-              time.sleep(0.5)
+          cd ..
           
-          # Save results to dl/link.txt
-          with open('dl/link.txt', 'w', encoding='utf-8') as f:
-              f.write("=" * 80 + "\n")
-              f.write(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-              f.write(f"Total links: {len(links)}\n")
-              f.write(f"Success: {success_count}\n")
-              f.write(f"Failed: {fail_count}\n")
-              f.write("=" * 80 + "\n\n")
-              
-              for result in results:
-                  if result['status'] == 'success':
-                      f.write(f"{result['original']}\n")
-                      f.write(f"  └─ {result['final']}\n\n")
-                  else:
-                      f.write(f"{result['original']}\n")
-                      f.write(f"  └─ FAILED\n\n")
+          # استخراج لینک‌های نهایی از خروجی
+          grep -E 'https?://' dl/output.txt | grep -v 'ouo.' > dl/successful_links.txt || true
           
-          # Save only successful links
-          with open('dl/successful_links.txt', 'w', encoding='utf-8') as f:
-              for result in results:
-                  if result['status'] == 'success':
-                      f.write(f"{result['final']}\n")
+      - name: Save results
+        run: |
+          echo "📊 نتایج پردازش:" > dl/link.txt
+          echo "=================" >> dl/link.txt
+          echo "" >> dl/link.txt
+          echo "لینک‌های اصلی (successful_links.txt):" >> dl/link.txt
+          cat dl/successful_links.txt >> dl/link.txt 2>/dev/null || echo "هیچ لینک موفقی یافت نشد" >> dl/link.txt
           
-          print("\n" + "=" * 60)
-          print(f"📊 Summary: {success_count} successful, {fail_count} failed")
-          print("📁 Results saved to dl folder:")
-          print("   - dl/link.txt (full details)")
-          print("   - dl/successful_links.txt (only successful links)")
-          EOF
-        env:
-          LINKS_INPUT: ${{ github.event.inputs.links }}
-
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
