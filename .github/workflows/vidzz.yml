@@ -1,0 +1,43 @@
+name: دانلود خودکار ویدیو از لینک صفحه
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_url:
+        description: 'لینک صفحه حاوی ویدیو'
+        required: true
+        type: string
+        default: 'https://videzz.net/rg9sj2tyb7yy.html'
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install yt-dlp
+        run: pip install yt-dlp
+
+      - name: Download video
+        run: |
+          mkdir -p dl
+          yt-dlp -o "dl/%(title)s.%(ext)s" \
+            --referer "https://videzz.net/" \
+            "${{ github.event.inputs.page_url }}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dl/
+          git commit -m "Add downloaded video [skip ci]" || echo "No changes to commit"
+          git push
