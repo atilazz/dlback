@@ -1,10 +1,10 @@
-name: دانلود خودکار ویدیو از لینک صفحه
+name: دانلود خودکار ویدیو از چند لینک
 
 on:
   workflow_dispatch:
     inputs:
-      page_url:
-        description: 'لینک صفحه حاوی ویدیو'
+      urls:
+        description: 'لینک‌های صفحات حاوی ویدیو (با ویرگول، فاصله یا خط جدید جدا کنید)'
         required: true
         type: string
         default: 'https://videzz.net/rg9sj2tyb7yy.html'
@@ -27,17 +27,133 @@ jobs:
       - name: Install yt-dlp
         run: pip install yt-dlp
 
-      - name: Download video
+      - name: Download videos
         run: |
           mkdir -p dl
-          yt-dlp -o "dl/%(title)s.%(ext)s" \
-            --referer "https://videzz.net/" \
-            "${{ github.event.inputs.page_url }}"
+          python3 << 'EOF'
+          import os
+          import re
+          import subprocess
+          from urllib.parse import urlparse
+
+          def get_unique_filename(base_path):
+              """اگر فایل وجود داشت، شماره به انتهای نام اضافه کن"""
+              if not os.path.exists(base_path):
+                  return base_path
+              
+              name, ext = os.path.splitext(base_path)
+              counter = 1
+              while True:
+                  new_path = f"{name}_{counter}{ext}"
+                  if not os.path.exists(new_path):
+                      return new_path
+                  counter += 1
+
+          def sanitize_filename(filename):
+              """حذف کاراکترهای غیرمجاز از نام فایل"""
+              return re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+          # دریافت و تجزیه لینک‌ها
+          raw_input = os.environ.get('URLS_INPUT', '')
+          
+          # تبدیل ویرگول، فاصله، تب و خط جدید به جداکننده
+          urls = re.split(r'[,\s\n]+', raw_input)
+          urls = [u.strip() for u in urls if u.strip() and u.strip().startswith('http')]
+          
+          print(f"🔍 تعداد لینک‌های دریافتی: {len(urls)}")
+          
+          success_count = 0
+          fail_count = 0
+          
+          for idx, url in enumerate(urls, 1):
+              print(f"\n📥 پردازش {idx}/{len(urls)}: {url}")
+              
+              try:
+                  # اجرای yt-dlp برای دریافت اطلاعات ویدیو
+                  # ابتدا عنوان ویدیو را دریافت می‌کنیم
+                  cmd_info = [
+                      'yt-dlp', '--get-title', '--no-warnings',
+                      '--referer', 'https://videzz.net/', url
+                  ]
+                  result = subprocess.run(cmd_info, capture_output=True, text=True)
+                  
+                  if result.returncode != 0:
+                      print(f"   ❌ خطا در دریافت اطلاعات: {result.stderr[:200]}")
+                      fail_count += 1
+                      continue
+                  
+                  title = result.stdout.strip()
+                  if not title:
+                      title = f"video_{idx}"
+                  
+                  # ساخت نام فایل
+                  safe_title = sanitize_filename(title)
+                  ext = '.mp4'  # پیش‌فرض
+                  
+                  # دانلود ویدیو با نام موقت برای تشخیص پسوند واقعی
+                  temp_pattern = f"dl/temp_{idx}_%(title)s.%(ext)s"
+                  cmd_download = [
+                      'yt-dlp', '-o', temp_pattern, '--no-warnings',
+                      '--referer', 'https://videzz.net/', url
+                  ]
+                  
+                  subprocess.run(cmd_download, capture_output=True)
+                  
+                  # پیدا کردن فایل دانلود شده
+                  downloaded_file = None
+                  for f in os.listdir('dl'):
+                      if f.startswith(f'temp_{idx}_'):
+                          downloaded_file = f
+                          break
+                  
+                  if downloaded_file:
+                      # استخراج پسوند واقعی
+                      _, ext = os.path.splitext(downloaded_file)
+                      final_filename = f"{safe_title}{ext}"
+                      final_path = os.path.join('dl', final_filename)
+                      
+                      # بررسی وجود فایل تکراری
+                      final_path = get_unique_filename(final_path)
+                      final_filename = os.path.basename(final_path)
+                      
+                      # تغییر نام فایل
+                      os.rename(os.path.join('dl', downloaded_file), final_path)
+                      print(f"   ✅ دانلود شد: {final_filename}")
+                      success_count += 1
+                  else:
+                      # fallback: مستقیماً با نام ساده دانلود کن
+                      output_template = f"dl/%(title)s.%(ext)s"
+                      cmd_download2 = [
+                          'yt-dlp', '-o', output_template, '--no-warnings',
+                          '--referer', 'https://videzz.net/', url
+                      ]
+                      subprocess.run(cmd_download2)
+                      
+                      # بررسی فایل‌های دانلود شده
+                      for f in os.listdir('dl'):
+                          if f.endswith('.mp4') or f.endswith('.mkv') or f.endswith('.webm'):
+                              if 'temp' not in f:
+                                  old_path = os.path.join('dl', f)
+                                  new_path = get_unique_filename(old_path)
+                                  if old_path != new_path:
+                                      os.rename(old_path, new_path)
+                                  print(f"   ✅ دانلود شد: {os.path.basename(new_path)}")
+                                  success_count += 1
+                                  break
+                          
+              except Exception as e:
+                  print(f"   ❌ خطا: {e}")
+                  fail_count += 1
+          
+          print(f"\n📊 خلاصه: {success_count} موفق, {fail_count} ناموفق")
+          EOF
+        env:
+          URLS_INPUT: ${{ github.event.inputs.urls }}
 
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add dl/
-          git commit -m "Add downloaded video [skip ci]" || echo "No changes to commit"
+          git commit -m "Add downloaded videos [skip ci]" || echo "No changes to commit"
           git push
